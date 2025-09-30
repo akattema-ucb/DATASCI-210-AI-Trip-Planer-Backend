@@ -1,13 +1,11 @@
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any
 from datetime import datetime
-import json
-import asyncio
 from contextlib import asynccontextmanager
+from mangum import Mangum
 
-from models import ChatRequest, ChatResponse, TripPlan, Attraction, DayItinerary
+from models import ChatRequest, ChatResponse, TripPlan
 from agents.trip_planner import TripPlannerAgent
 from agents.chat_agent import ChatAgent
 from agents.optimizer import ItineraryOptimizer
@@ -148,6 +146,8 @@ async def broadcast_update(data: Dict[str, Any]):
         except:
             # Remove dead connections
             active_connections.remove(connection)
+
+handler = Mangum(app, lifespan="off")
 
 if __name__ == "__main__":
     import uvicorn

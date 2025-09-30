@@ -1,0 +1,89 @@
+name: Build & Push (Autodiscover Backends)
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'api/**'
+      - 'backend/**'
+      - '.github/workflows/build-and-push-autodiscover.yml'
+  workflow_dispatch: {}
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+  ECR_NAMESPACE: ${{ vars.ECR_NAMESPACE }}
+  REGISTRY: ${{ vars.AWS_ACCOUNT_ID }}.dkr.ecr.${{ vars.AWS_REGION }}.amazonaws.com
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: set-matrix
+        run: |
+          # Build a JSON array of service objects: [{name,context,repository}, ...]
+          arr='[{"name":"api","context":"./api","repository":"'"${ECR_NAMESPACE}"'/api"}'
+          # Append each backend/<svc>/Dockerfile as a service
+          for f in backend/*/Dockerfile; do
+            [ -e "$f" ] || continue
+            svc=$(basename "$(dirname "$f")")
+            arr="${arr}, {\"name\":\"${svc}\",\"context\":\"./backend/${svc}\",\"repository\":\"${ECR_NAMESPACE}/${svc}\"}"
+          done
+          arr="${arr}]"
+          echo "matrix={\"include\":${arr}}" >> $GITHUB_OUTPUT
+
+  build-push:
+    needs: discover
+    runs-on: ubuntu-latest
+    strategy:
+      matrix: ${{ fromJson(needs.discover.outputs.matrix) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ env.AWS_ACCOUNT_ID }}:role/github-actions-ecr
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Ensure ECR repository exists
+        run: |
+          aws ecr describe-repositories --repository-names "${{ matrix.repository }}" >/dev/null 2>&1 \
+            || aws ecr create-repository --repository-name "${{ matrix.repository }}"
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            ${{ env.REGISTRY }}/${{ matrix.repository }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,format=long
+            type=ref,event=branch
+            type=ref,event=tag
+
+      - name: Build & Push
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          push: true
+          provenance: false
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
